@@ -1,57 +1,84 @@
+// src/nowpayments.ts
 import crypto from "crypto";
 import { ENV } from "./env.js";
 
-const API = "https://api.nowpayments.io/v1";
+const BASE = "https://api.nowpayments.io/v1";
 
 type CreateInvoiceArgs = {
-  orderId: string;               // Shopify Admin GID or name
-  amount: number;                // outstanding amount
-  currency: string;              // e.g. 'USD'
-  successUrl: string;            // where to go after successful payment
-  cancelUrl: string;             // where to go if cancelled
+  orderId: string;
+  amount: number;
+  currency: string;
+  successUrl: string;
+  cancelUrl: string;
 };
 
-export async function createInvoice(args: CreateInvoiceArgs) {
+type NowPaymentsInvoice = { id: number; invoice_url: string };
+
+function getApiKey(): string {
+  const key = (ENV.NOWPAYMENTS_API_KEY ?? "").trim(); // <- trim just in case
+  if (!key) throw new Error("NOWPayments API key missing (ENV.NOWPAYMENTS_API_KEY)");
+  return key;
+}
+
+export async function createInvoice(args: CreateInvoiceArgs): Promise<NowPaymentsInvoice> {
+  if (!(args.amount > 0)) throw new Error(`Invalid amount "${args.amount}"`);
+  if (!args.currency) throw new Error("Missing currency");
+
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 15_000); // 15s timeout
+  const timeout = setTimeout(() => ctrl.abort(), 15_000);
 
   try {
-    const res = await fetch(`${API}/invoice`, {
+    const payload = {
+      price_amount: Number(args.amount),
+      price_currency: args.currency,
+      order_id: args.orderId,
+      order_description: `Invoice for ${args.orderId}`,
+      ipn_callback_url: `${ENV.APP_URL}/ipn/nowpayments`,
+      success_url: args.successUrl,
+      cancel_url: args.cancelUrl,
+    };
+
+    const res = await fetch(`${BASE}/invoice`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": ENV.NOWPAYMENTS_API_KEY
+        "x-api-key": getApiKey(),
       },
-      body: JSON.stringify({
-        price_amount: args.amount,
-        price_currency: args.currency,
-        order_id: args.orderId,
-        order_description: `Order ${args.orderId}`,
-        ipn_callback_url: `${ENV.APP_URL}/ipn/nowpayments`,
-        success_url: args.successUrl,
-        cancel_url: args.cancelUrl
-      }),
-      signal: ctrl.signal
+      body: JSON.stringify(payload),
+      signal: ctrl.signal,
     });
 
+    const text = await res.text().catch(() => "");
     if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`NOWPayments invoice failed: ${res.status} ${txt}`);
+      if (res.status === 403) {
+        // One-time diagnostic to confirm what the service is actually holding
+        console.error(
+          "NOWPayments 403 INVALID_API_KEY — key length:",
+          (ENV.NOWPAYMENTS_API_KEY ?? "").length,
+          "trimmed length:",
+          getApiKey().length
+        );
+      }
+      throw new Error(`NOWPayments invoice failed: ${res.status} ${text}`);
     }
-    return res.json() as Promise<{ id: number; invoice_url: string }>;
+
+    return JSON.parse(text) as NowPaymentsInvoice;
   } finally {
-    clearTimeout(t);
+    clearTimeout(timeout);
   }
 }
 
-
-// NOWPayments HMAC-SHA512 signature check.
-// They sign the JSON body (keys sorted) with your IPN secret, header: x-nowpayments-sig
-export function verifyIpnSignature(body: any, sigHeader?: string | null) {
-  if (!sigHeader) return false;
-  const json = JSON.stringify(body, Object.keys(body).sort());
+export function verifyIpnSignature(body: unknown, sigHeader?: string | null): boolean {
+  if (!sigHeader || !ENV.NOWPAYMENTS_IPN_SECRET) return false;
+  const json = JSON.stringify(body, Object.keys(body as object).sort());
   const h = crypto.createHmac("sha512", ENV.NOWPAYMENTS_IPN_SECRET);
   h.update(json);
-  const digest = h.digest("hex");
-  return digest === sigHeader;
+  const expected = h.digest("hex");
+  try {
+    const a = Buffer.from(expected, "utf8");
+    const b = Buffer.from(sigHeader.trim(), "utf8");
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }

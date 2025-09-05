@@ -48,7 +48,7 @@ export async function startPay(req: Request, res: Response) {
     }
 
     const orderId = shopifyOrder.id; // Admin GraphQL ID
-    const existing = getMapping(orderId);
+    const existing = await getMapping(orderId);
     let invoiceUrl = existing?.invoiceUrl;
 
     if (!invoiceUrl) {
@@ -61,7 +61,7 @@ export async function startPay(req: Request, res: Response) {
 
       const invoice = await createInvoice({ orderId, amount: outstanding, currency, successUrl, cancelUrl });
       invoiceUrl = invoice.invoice_url;
-      saveMapping(orderId, shopifyOrder.name, invoiceUrl);
+      saveMapping(orderId, shopifyOrder.name, invoiceUrl, outstanding, currency);
     }
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
